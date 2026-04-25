@@ -1,0 +1,9 @@
+debug/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.pt
+*.pth
+*.onnx
+*.zip
