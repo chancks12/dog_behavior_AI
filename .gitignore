@@ -1,4 +1,5 @@
 debug/
+*.db
 *.mp4
 *.avi
 *.mov
