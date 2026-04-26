@@ -6,6 +6,7 @@ DB_PATH = "dog_behavior.db"
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row  # 결과를 dict처럼 사용 가능
+    conn.execute("PRAGMA journal_mode=WAL")   # 동시 쓰기 성능 향상 (초당 10회 이상 로깅 무결성)
     conn.execute("PRAGMA foreign_keys = ON")  # FK CASCADE 활성화
     return conn
 
