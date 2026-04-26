@@ -171,6 +171,29 @@ def handle_get_videos(cursor, data):
                "uploaded_at":    r["uploaded_at"]} for r in rows]
     return {"status": "ok", "videos": videos}
 
+def handle_get_video_file(cursor, data):
+    video_id     = data.get("video_id")
+    use_annotated = data.get("use_annotated", False)
+
+    cursor.execute(
+        "SELECT filepath, annotated_path FROM videos WHERE id=?", (video_id,))
+    row = cursor.fetchone()
+    if not row:
+        return {"status": "error", "message": "영상 없음"}
+
+    path = row["annotated_path"] if (use_annotated and row["annotated_path"]) else row["filepath"]
+
+    if not path or not os.path.exists(path):
+        return {"status": "error", "message": "서버에 파일이 없습니다"}
+
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode()
+
+    return {
+        "status":    "ok",
+        "filename":  os.path.basename(path),
+        "file_data": encoded
+    }
 
 def handle_get_logs(cursor, data):
     video_id = data.get("video_id")
@@ -257,6 +280,8 @@ def handle_client(client_sock, addr):
             elif msg_type == "get_videos":   response = handle_get_videos(cursor, data)
             elif msg_type == "get_logs":     response = handle_get_logs(cursor, data)
             elif msg_type == "delete_video": response = handle_delete_video(cursor, conn, data)
+            elif msg_type == "get_video_file":
+                response = handle_get_video_file(cursor, data)
             else:                            response = {"status": "error", "message": "알 수 없는 요청"}
 
             send_msg(client_sock, response)

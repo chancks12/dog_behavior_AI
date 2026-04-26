@@ -65,6 +65,8 @@ class Network:
             "user_id": self.user_id
         })
 
+
+
     def get_logs(self, video_id):
         return self.send({
             "type":     "get_logs",

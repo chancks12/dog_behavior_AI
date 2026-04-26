@@ -1,11 +1,12 @@
 # client/main_window.py
 import os
 import base64
+import tempfile
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QTabWidget,
     QListWidget, QListWidgetItem, QSplitter,
-    QFileDialog, QMessageBox, QProgressBar,  QSlider
+    QFileDialog, QMessageBox, QProgressBar, QSlider
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import QFont
@@ -63,6 +64,8 @@ def format_log_message(behavior_class, nearby_objects):
     if location:
         return f"{location} {behavior}"
     return behavior
+
+
 # ── 업로드 워커 (별도 스레드) ─────────────────────────────────
 class UploadWorker(QThread):
     finished = pyqtSignal(dict)
@@ -88,11 +91,55 @@ class UploadWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self, network):
         super().__init__()
-        self.network = network
+        self.network          = network
         self.current_video_id = None
         self.upload_worker    = None
+        self.current_tmp_path = None  # 현재 로컬에 저장된 임시 영상 경로
         self.init_ui()
         self.load_videos()
+
+    # ── 서버에서 영상 받아서 임시파일로 재생 ─────────────────
+    def load_and_play_video(self, video, timestamp_ms=0):
+        """
+        서버에서 영상 파일을 받아 임시 경로에 저장 후 재생.
+        같은 영상이 이미 로컬에 있으면 재다운로드 없이 재활용.
+        """
+        annotated = bool(video.get("annotated_path", ""))
+
+        # 같은 영상이 이미 임시 저장되어 있으면 재활용
+        if self.current_tmp_path and os.path.exists(self.current_tmp_path):
+            expected_name = os.path.basename(self.current_tmp_path)
+            # video_id 기반으로 캐시 유효성 확인
+            if str(video["video_id"]) in expected_name:
+                self.media_player.setSource(
+                    QUrl.fromLocalFile(self.current_tmp_path))
+                if timestamp_ms > 0:
+                    self.media_player.setPosition(timestamp_ms)
+                self.media_player.play()
+                return
+
+        # 서버에서 영상 다운로드
+        response = self.network.get_video_file(
+            video["video_id"], use_annotated=annotated)
+        if response["status"] != "ok":
+            QMessageBox.warning(self, "오류", response["message"])
+            return
+
+        # video_id를 파일명에 포함시켜 캐시 구분
+        raw_name  = response["filename"]
+        name, ext = os.path.splitext(raw_name)
+        tmp_name  = f"{name}_id{video['video_id']}{ext}"
+        tmp_path  = os.path.join(tempfile.gettempdir(), tmp_name)
+
+        with open(tmp_path, "wb") as f:
+            f.write(base64.b64decode(response["file_data"]))
+
+        self.current_tmp_path = tmp_path
+
+        self.media_player.setSource(QUrl.fromLocalFile(tmp_path))
+        if timestamp_ms > 0:
+            self.media_player.setPosition(timestamp_ms)
+        self.media_player.play()
 
     def init_ui(self):
         self.setWindowTitle("강아지 행동 인식 AI")
@@ -133,10 +180,11 @@ class MainWindow(QMainWindow):
 
         # ── 탭 ──
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("QTabBar::tab { height: 36px; min-width: 120px; font-size: 13px; }")
-        self.tabs.addTab(self.build_upload_tab(),  "영상 업로드")
-        self.tabs.addTab(self.build_log_tab(),     "로그 확인")
-        self.tabs.addTab(self.build_delete_tab(),  "영상 삭제")
+        self.tabs.setStyleSheet(
+            "QTabBar::tab { height: 36px; min-width: 120px; font-size: 13px; }")
+        self.tabs.addTab(self.build_upload_tab(), "영상 업로드")
+        self.tabs.addTab(self.build_log_tab(),    "로그 확인")
+        self.tabs.addTab(self.build_delete_tab(), "영상 삭제")
         self.tabs.currentChanged.connect(self.on_tab_changed)
         root.addWidget(self.tabs)
 
@@ -147,7 +195,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(30, 30, 30, 30)
         layout.setSpacing(12)
 
-        # 파일 선택 영역
         zone = QWidget()
         zone.setFixedHeight(100)
         zone.setStyleSheet("""
@@ -165,17 +212,16 @@ class MainWindow(QMainWindow):
 
         btn_select = QPushButton("파일 선택")
         btn_select.setFixedSize(100, 32)
-        btn_select.setStyleSheet("border: 1px solid #AAAAAA; border-radius: 4px; background: white;")
+        btn_select.setStyleSheet(
+            "border: 1px solid #AAAAAA; border-radius: 4px; background: white;")
         btn_select.clicked.connect(self.select_file)
         zone_layout.addWidget(btn_select, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(zone)
 
-        # 선택된 파일 정보
         self.lbl_file_info = QLabel("선택된 파일 없음")
         self.lbl_file_info.setStyleSheet("color: #444; font-size: 13px;")
         layout.addWidget(self.lbl_file_info)
 
-        # 업로드 버튼 + 상태
         btn_row = QHBoxLayout()
         self.btn_upload = QPushButton("업로드 시작")
         self.btn_upload.setFixedSize(120, 38)
@@ -240,33 +286,28 @@ class MainWindow(QMainWindow):
         # 우측 패널 (70%) — 영상 재생
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(6, 4, 12, 4)  # 여백 줄이기
-        right_layout.setSpacing(4)  # 간격 줄이기
+        right_layout.setContentsMargins(6, 4, 12, 4)
+        right_layout.setSpacing(4)
 
-        # 영상 위젯 (stretch로 최대한 크게)
         self.video_widget = QVideoWidget()
         self.video_widget.setStyleSheet("background-color: black;")
-        right_layout.addWidget(self.video_widget, stretch=1)  # ← stretch=1 추가
+        right_layout.addWidget(self.video_widget, stretch=1)
 
-        # 미디어 플레이어
         self.media_player = QMediaPlayer()
         self.media_player.setVideoOutput(self.video_widget)
         self.media_player.positionChanged.connect(self.on_position_changed)
         self.media_player.durationChanged.connect(self.on_duration_changed)
 
-        # 슬라이더
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 0)
         self.slider.sliderMoved.connect(self.on_slider_moved)
         right_layout.addWidget(self.slider)
 
-        # 시간 + 컨트롤 버튼 한 줄로
         bottom_layout = QHBoxLayout()
 
         self.lbl_time = QLabel("00:00 / 00:00")
         self.lbl_time.setStyleSheet("font-size: 11px; color: gray;")
         bottom_layout.addWidget(self.lbl_time)
-
         bottom_layout.addStretch()
 
         btn_play = QPushButton("재생")
@@ -331,7 +372,6 @@ class MainWindow(QMainWindow):
 
             videos = response["videos"]
 
-            # 탭2 영상 목록
             self.list_videos.clear()
             for v in videos:
                 status_text = {
@@ -344,7 +384,6 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.ItemDataRole.UserRole, v)
                 self.list_videos.addItem(item)
 
-            # 탭3 삭제 목록
             self.list_delete.clear()
             for v in videos:
                 item = QListWidgetItem(
@@ -412,14 +451,9 @@ class MainWindow(QMainWindow):
     def on_video_selected(self, item):
         video = item.data(Qt.ItemDataRole.UserRole)
         self.current_video_id = video["video_id"]
+        self.current_tmp_path = None  # 새 영상 선택 시 캐시 초기화
 
-        # 영상 즉시 로드 (로그 클릭 전에도 재생 가능)
-        annotated = video.get("annotated_path", "")
-        filepath = annotated if annotated and os.path.exists(annotated) else video.get("filepath", "")
-
-        if filepath and os.path.exists(filepath):
-            self.media_player.setSource(QUrl.fromLocalFile(os.path.abspath(filepath)))
-            self.media_player.play()
+        self.load_and_play_video(video)
 
         if video["status"] != "done":
             self.list_logs.clear()
@@ -435,17 +469,17 @@ class MainWindow(QMainWindow):
                 return
 
             for log in response["logs"]:
-                ts = log["timestamp_sec"]
-                cls = log["behavior_class"]
-                conf = int(log["confidence"] * 100)
+                ts    = log["timestamp_sec"]
+                cls   = log["behavior_class"]
+                conf  = int(log["confidence"] * 100)
                 nearby = log.get("nearby_objects", [])
                 m = int(ts // 60)
                 s = ts % 60
 
                 message = format_log_message(cls, nearby)
-                item = QListWidgetItem(f"{m:02d}:{s:05.2f}  {message}  {conf}%")
-                item.setData(Qt.ItemDataRole.UserRole, log)
-                self.list_logs.addItem(item)
+                log_item = QListWidgetItem(f"{m:02d}:{s:05.2f}  {message}  {conf}%")
+                log_item.setData(Qt.ItemDataRole.UserRole, log)
+                self.list_logs.addItem(log_item)
 
         except Exception as e:
             QMessageBox.critical(self, "오류", f"로그 로드 실패\n{e}")
@@ -460,19 +494,10 @@ class MainWindow(QMainWindow):
         if not selected:
             return
 
-        video = selected.data(Qt.ItemDataRole.UserRole)
-        annotated = video.get("annotated_path", "")
-        filepath = annotated if annotated and os.path.exists(annotated) else video.get("filepath")
-
-        if not filepath or not os.path.exists(filepath):
-            QMessageBox.warning(self, "오류", "영상 파일을 찾을 수 없습니다")
-            return
-
+        video        = selected.data(Qt.ItemDataRole.UserRole)
         timestamp_ms = int(log["timestamp_sec"] * 1000)
-        self.media_player.setSource(QUrl.fromLocalFile(os.path.abspath(filepath)))
-        self.media_player.setPosition(timestamp_ms)
-        self.media_player.play()
 
+        self.load_and_play_video(video, timestamp_ms)
 
     # ── 영상 삭제 ─────────────────────────────────────────────
     def do_delete(self):
@@ -505,7 +530,7 @@ class MainWindow(QMainWindow):
 
     # ── 탭 전환 시 목록 갱신 ─────────────────────────────────
     def on_tab_changed(self, index):
-        if index in (1, 2):  # 로그 확인, 영상 삭제 탭
+        if index in (1, 2):
             self.load_videos()
 
     def on_slider_moved(self, position):
@@ -522,6 +547,7 @@ class MainWindow(QMainWindow):
 
     def on_duration_changed(self, duration):
         self.slider.setRange(0, duration)
+
     # ── 로그아웃 ─────────────────────────────────────────────
     def do_logout(self):
         try:
